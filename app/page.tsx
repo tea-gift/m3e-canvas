@@ -7,6 +7,7 @@ import { setGlobalLang, type Lang } from "@/lib/i18n";
 import { preferredLang } from "@/lib/lang";
 import { LAST_KEY, adoptLegacy, createProject, loadProject, memoryBackend, openElsewhere, openProjects, readOnly, receiveDesign, resolveProject, smallStorage, writesSettled, type Backend, type Project } from "@/lib/projects";
 import { hasShareHash, readShareHash } from "@/lib/share";
+import { isProject } from "@/lib/project";
 import type { Doc } from "@/lib/tokens";
 import type { EditorNotice } from "./Editor";
 
@@ -37,6 +38,27 @@ const addressOf = (id: string) => `${window.location.pathname}?${PROJECT_PARAM}=
 
 type Opened = { backend: Backend; project: Project; notice?: EditorNotice };
 
+/** A design kept on the server beside the app, so one short address always opens its
+ *  latest version: `#shared=<name>` fetches `shared/<name>.json` (no-store) and takes it
+ *  as the visit's design, updating in place the project an earlier shared visit made. */
+const SHARED_PARAM = "shared";
+const sharedName = () => {
+  const name = new URLSearchParams(window.location.hash.replace(/^#/, "")).get(SHARED_PARAM);
+  return name && /^[a-z0-9-]+$/i.test(name) ? name : null;
+};
+
+async function fetchSharedDoc(name: string): Promise<Doc | null> {
+  try {
+    const base = window.location.pathname.replace(/[^/]*$/, "");
+    const res = await fetch(`${base}shared/${name}.json`, { cache: "no-store" });
+    if (!res.ok) return null;
+    const value: unknown = await res.json();
+    return isProject(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Reads the project the address asks for. A design carried in the address's hash is taken
  *  here, before any editor is mounted: into the project when the author has not touched it
  *  and no other tab has it open, otherwise into a project of its own. */
@@ -49,7 +71,36 @@ async function openStored(): Promise<Opened> {
   const resolved = await resolveProject(backend, storage, wantedId());
   let project = resolved.project;
   let notice: EditorNotice | undefined = resolved.missing ? "missing" : undefined;
-  if (hasShareHash(window.location.hash)) {
+  const shared = sharedName();
+  if (shared) {
+    const doc = await fetchSharedDoc(shared);
+    if (doc) {
+      /* the project this shared name made on an earlier visit is updated in place, so the
+       * address keeps naming one shared project instead of a new copy per visit */
+      const key = `m3e:shared:${shared}`;
+      let kept: Project | null = null;
+      try {
+        const prevId = storage.getItem(key);
+        if (prevId) kept = await loadProject(backend, prevId);
+      } catch {}
+      if (kept) {
+        const meta = { ...kept.meta, title: doc.title, updatedAt: Date.now(), screens: doc.frames.length, edited: true };
+        await backend.write(meta, { doc, before: null });
+        project = (await loadProject(backend, meta.id)) ?? project;
+      } else {
+        const meta = await createProject(backend, doc);
+        project = (await loadProject(backend, meta.id)) ?? project;
+        try {
+          storage.setItem(key, meta.id);
+        } catch {}
+      }
+      try {
+        storage.setItem(LAST_KEY, project.meta.id);
+      } catch {}
+    } else {
+      notice = "invalid";
+    }
+  } else if (hasShareHash(window.location.hash)) {
     const doc = await readShareHash(window.location.hash);
     if (doc) {
       const meta = await receiveDesign(backend, (await openElsewhere(project.meta.id)) ? null : project.meta, doc);
