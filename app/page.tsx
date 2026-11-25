@@ -235,6 +235,8 @@ export default function Page() {
   }, [phase]);
 
   const [pub, setPub] = useState<"idle" | "busy" | "done" | "error">("idle");
+  const [asking, setAsking] = useState(false);
+  const [tokenText, setTokenText] = useState("");
 
   /** publish the shared project on screen back to the server's shared file, so every
    *  browser opening the shared address sees this version */
@@ -252,14 +254,13 @@ export default function Page() {
       const writeUrl = (cfg as { writeUrl?: string }).writeUrl;
       if (!writeUrl) throw new Error("no write endpoint configured");
       const TOKEN_KEY = "m3e:shared:token";
-      let token = window.localStorage.getItem(TOKEN_KEY);
+      const token = window.localStorage.getItem(TOKEN_KEY);
       if (!token) {
-        token = window.prompt("输入共享口令（只需输一次）");
-        if (!token) {
-          setPub("idle");
-          return;
-        }
-        window.localStorage.setItem(TOKEN_KEY, token);
+        /* no password yet: ask in the page itself (a native prompt is dismissed
+         * unseen by some browsers, which would abort the publish silently) */
+        setPub("idle");
+        setAsking(true);
+        return;
       }
       const res = await fetch(`${writeUrl}/shared/${current.sharedName}.json`, {
         method: "POST",
@@ -275,6 +276,18 @@ export default function Page() {
       setTimeout(() => setPub("idle"), 3000);
     }
   }, [pub]);
+
+  /** keep the shared password the author typed, then publish with it */
+  const confirmToken = useCallback(() => {
+    const value = tokenText.trim();
+    if (!value) return;
+    try {
+      window.localStorage.setItem("m3e:shared:token", value);
+    } catch {}
+    setTokenText("");
+    setAsking(false);
+    void publish();
+  }, [tokenText, publish]);
 
   /** a design that reached an editor whose project already holds work */
   const arrive = useCallback(
@@ -313,15 +326,34 @@ export default function Page() {
         />
       )}
       {phase !== "done" && <Boot done={phase === "fading"} />}
-      {opened?.sharedName && (
-        <button
-          type="button"
-          onClick={() => void publish()}
-          style={{ position: "fixed", top: 12, right: 12, zIndex: 9999, padding: "8px 16px", borderRadius: 999, border: "none", background: "#0b57d0", color: "#fff", fontSize: 14, cursor: "pointer", boxShadow: "0 2px 8px rgba(0,0,0,0.3)" }}
-        >
-          {pub === "busy" ? "发布中…" : pub === "done" ? "已同步 ✓" : pub === "error" ? "同步失败，点重试" : "发布到共享"}
-        </button>
-      )}
+      {opened?.sharedName &&
+        (asking ? (
+          <div style={{ position: "fixed", top: 12, right: 12, zIndex: 10000, display: "flex", gap: 8, alignItems: "center", background: "#fff", padding: 8, borderRadius: 999, boxShadow: "0 2px 8px rgba(0,0,0,0.3)" }}>
+            <input
+              type="password"
+              value={tokenText}
+              onChange={(e) => setTokenText(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && confirmToken()}
+              placeholder="共享口令（只需输一次）"
+              autoFocus
+              style={{ border: "1px solid #ccc", borderRadius: 999, padding: "6px 12px", fontSize: 14, outline: "none", color: "#111", background: "#fff" }}
+            />
+            <button type="button" onClick={confirmToken} style={{ padding: "6px 14px", borderRadius: 999, border: "none", background: "#0b57d0", color: "#fff", fontSize: 14, cursor: "pointer" }}>
+              同步
+            </button>
+            <button type="button" onClick={() => setAsking(false)} style={{ padding: "6px 10px", borderRadius: 999, border: "none", background: "transparent", color: "#555", fontSize: 14, cursor: "pointer" }}>
+              取消
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => void publish()}
+            style={{ position: "fixed", top: 12, right: 12, zIndex: 9999, padding: "8px 16px", borderRadius: 999, border: "none", background: "#0b57d0", color: "#fff", fontSize: 14, cursor: "pointer", boxShadow: "0 2px 8px rgba(0,0,0,0.3)" }}
+          >
+            {pub === "busy" ? "发布中…" : pub === "done" ? "已同步 ✓" : pub === "error" ? "同步失败，点重试" : "发布到共享"}
+          </button>
+        ))}
     </>
   );
 }
