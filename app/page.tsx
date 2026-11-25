@@ -6,7 +6,7 @@ import { Skeleton } from "@/components/Skeleton";
 import { setGlobalLang, type Lang } from "@/lib/i18n";
 import { preferredLang } from "@/lib/lang";
 import { LAST_KEY, adoptLegacy, createProject, loadProject, memoryBackend, openElsewhere, openProjects, readOnly, receiveDesign, resolveProject, smallStorage, writesSettled, type Backend, type Project } from "@/lib/projects";
-import { hasShareHash, readShareHash } from "@/lib/share";
+import { hasShareHash, readShareHash, shareable } from "@/lib/share";
 import { isProject } from "@/lib/project";
 import type { Doc } from "@/lib/tokens";
 import type { EditorNotice } from "./Editor";
@@ -36,7 +36,7 @@ const PROJECT_PARAM = "p";
 const wantedId = () => new URLSearchParams(window.location.search).get(PROJECT_PARAM);
 const addressOf = (id: string) => `${window.location.pathname}?${PROJECT_PARAM}=${encodeURIComponent(id)}`;
 
-type Opened = { backend: Backend; project: Project; notice?: EditorNotice };
+type Opened = { backend: Backend; project: Project; notice?: EditorNotice; sharedName?: string };
 
 /** A design kept on the server beside the app, so one short address always opens its
  *  latest version: `#shared=<name>` fetches `shared/<name>.json` (no-store) and takes it
@@ -57,6 +57,18 @@ async function fetchSharedDoc(name: string): Promise<Doc | null> {
   } catch {
     return null;
   }
+}
+
+/** the shared name whose project this is, if any: a shared visit remembers the project
+ *  it made in localStorage, so a later visit to that same project is still a shared one */
+function sharedNameOf(id: string): string | undefined {
+  try {
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (k && k.startsWith("m3e:shared:") && window.localStorage.getItem(k) === id) return k.slice("m3e:shared:".length);
+    }
+  } catch {}
+  return undefined;
 }
 
 /** Reads the project the address asks for. A design carried in the address's hash is taken
@@ -114,9 +126,10 @@ async function openStored(): Promise<Opened> {
       notice = "invalid";
     }
   }
+  const sharedFor = sharedNameOf(project.meta.id);
   /* the hash is dropped with the same stroke: the design has been taken or declined */
   window.history.replaceState(null, "", addressOf(project.meta.id));
-  return { backend, project, notice };
+  return { backend, project, notice, sharedName: sharedFor };
 }
 
 /** What a visit falls back to when storage would not open the project (a quota that is full,
@@ -221,6 +234,48 @@ export default function Page() {
     return () => clearTimeout(id);
   }, [phase]);
 
+  const [pub, setPub] = useState<"idle" | "busy" | "done" | "error">("idle");
+
+  /** publish the shared project on screen back to the server's shared file, so every
+   *  browser opening the shared address sees this version */
+  const publish = useCallback(async () => {
+    const current = openedRef.current;
+    if (!current?.sharedName || pub === "busy") return;
+    setPub("busy");
+    try {
+      await writesSettled();
+      const fresh = await loadProject(current.backend, current.project.meta.id);
+      const doc = fresh?.doc ?? current.project.doc;
+      if (!doc) throw new Error("nothing to publish");
+      const base = window.location.pathname.replace(/[^/]*$/, "");
+      const cfg: unknown = await (await fetch(`${base}shared/config.json`, { cache: "no-store" })).json();
+      const writeUrl = (cfg as { writeUrl?: string }).writeUrl;
+      if (!writeUrl) throw new Error("no write endpoint configured");
+      const TOKEN_KEY = "m3e:shared:token";
+      let token = window.localStorage.getItem(TOKEN_KEY);
+      if (!token) {
+        token = window.prompt("输入共享口令（只需输一次）");
+        if (!token) {
+          setPub("idle");
+          return;
+        }
+        window.localStorage.setItem(TOKEN_KEY, token);
+      }
+      const res = await fetch(`${writeUrl}/shared/${current.sharedName}.json`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-shared-token": token },
+        body: JSON.stringify(shareable(doc)),
+      });
+      if (res.status === 401) window.localStorage.removeItem(TOKEN_KEY);
+      if (!res.ok) throw new Error(`publish failed: ${res.status}`);
+      setPub("done");
+      setTimeout(() => setPub("idle"), 2500);
+    } catch {
+      setPub("error");
+      setTimeout(() => setPub("idle"), 3000);
+    }
+  }, [pub]);
+
   /** a design that reached an editor whose project already holds work */
   const arrive = useCallback(
     async (doc: Doc): Promise<boolean> => {
@@ -258,6 +313,15 @@ export default function Page() {
         />
       )}
       {phase !== "done" && <Boot done={phase === "fading"} />}
+      {opened?.sharedName && (
+        <button
+          type="button"
+          onClick={() => void publish()}
+          style={{ position: "fixed", top: 12, right: 12, zIndex: 9999, padding: "8px 16px", borderRadius: 999, border: "none", background: "#0b57d0", color: "#fff", fontSize: 14, cursor: "pointer", boxShadow: "0 2px 8px rgba(0,0,0,0.3)" }}
+        >
+          {pub === "busy" ? "发布中…" : pub === "done" ? "已同步 ✓" : pub === "error" ? "同步失败，点重试" : "发布到共享"}
+        </button>
+      )}
     </>
   );
 }
